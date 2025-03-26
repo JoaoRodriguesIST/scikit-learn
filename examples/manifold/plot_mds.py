@@ -83,7 +83,7 @@ plt.legend(scatterpoints=1, loc="best", shadow=False)
 similarities = similarities.max() / (similarities + EPSILON) * 100
 np.fill_diagonal(similarities, 0)
 # Plot the edges
-start_idx, end_idx = np.where(pos)
+start_idx, end_idx = pos.nonzero()
 # a sequence of (*line0*, *line1*, *line2*), where::
 #            linen = (x0, y0), (x1, y1), ... (xm, ym)
 segments = [
