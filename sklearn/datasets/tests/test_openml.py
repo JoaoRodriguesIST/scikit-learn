@@ -21,6 +21,7 @@ from sklearn.datasets._openml import (
     _open_openml_url,
     _retry_with_clean_cache,
 )
+from sklearn.datasets import download_openml
 from sklearn.utils import Bunch
 from sklearn.utils._optional_dependencies import check_pandas_support
 from sklearn.utils._testing import (
@@ -1632,3 +1633,351 @@ def test_fetch_openml_quotechar_escapechar(monkeypatch):
     adult_pandas = fetch_openml(parser="pandas", **common_params)
     adult_liac_arff = fetch_openml(parser="liac-arff", **common_params)
     pd.testing.assert_frame_equal(adult_pandas.frame, adult_liac_arff.frame)
+
+
+###############################################################################
+# download_openml tests
+
+
+@pytest.mark.parametrize(
+    "data_id, dataset_params, expected_format",
+    [
+        # iris dataset - test both ID and name/version lookup
+        (61, {"data_id": 61}, "arff"),
+        (61, {"name": "iris", "version": 1}, "arff"),
+        # anneal dataset 
+        (2, {"data_id": 2}, "arff"),
+        (2, {"name": "anneal", "version": 1}, "arff"),
+        # cpu dataset
+        (561, {"data_id": 561}, "arff"),
+        (561, {"name": "cpu", "version": 1}, "arff"),
+    ],
+)
+@pytest.mark.parametrize("format", ["arff"])  # Only ARFF format for now since mock data only supports ARFF
+@pytest.mark.parametrize("gzip_response", [True, False])
+def test_download_openml_basic_functionality(
+    monkeypatch, data_id, dataset_params, expected_format, format, gzip_response, tmpdir
+):
+    """Test basic functionality of download_openml with ARFF format.
+    
+    Verifies:
+    - File path returns and file existence
+    - Correct file extensions
+    - Basic metadata structure
+    - Target column extraction
+    """
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=gzip_response)
+    
+    # Use temporary directory
+    cache_directory = str(tmpdir.mkdir("test_download_cache"))
+    
+    # Download the dataset
+    data_path, metadata_path = download_openml(
+        cache=True,
+        data_home=cache_directory,
+        format=format,
+        **dataset_params
+    )
+    
+    # Check file paths are returned
+    assert isinstance(data_path, str)
+    assert isinstance(metadata_path, str)
+    
+    # Check files exist
+    assert os.path.exists(data_path)
+    assert os.path.exists(metadata_path)
+    
+    # Check correct file extensions
+    if format == "arff":
+        assert data_path.endswith(".arff")
+    elif format == "parquet":
+        assert data_path.endswith(".parquet")
+    
+    assert metadata_path.endswith(".json")
+    
+    # Check metadata structure
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+    
+    # Verify required metadata fields
+    assert "dataset_id" in metadata
+    assert "name" in metadata
+    assert "target_columns" in metadata
+    assert "features" in metadata
+    assert "format" in metadata
+    
+    # Check that dataset_id matches
+    assert metadata["dataset_id"] == data_id
+    assert metadata["format"] == format
+    
+    # Check that target_columns is a list
+    assert isinstance(metadata["target_columns"], list)
+    assert len(metadata["target_columns"]) > 0
+    
+    # Check that features is a list  
+    assert isinstance(metadata["features"], list)
+    assert len(metadata["features"]) > 0
+
+
+@pytest.mark.parametrize("gzip_response", [True, False])
+def test_download_openml_file_content_arff(monkeypatch, gzip_response, tmpdir):
+    """Test that downloaded ARFF files have correct content structure."""
+    data_id = 61  # iris dataset
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=gzip_response)
+    
+    cache_directory = str(tmpdir.mkdir("test_download_cache"))
+    
+    data_path, metadata_path = download_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        format="arff"
+    )
+    
+    # Check ARFF file content structure
+    with open(data_path, "r") as f:
+        content = f.read()
+    
+    # Basic ARFF structure checks
+    assert "@relation" in content.lower()
+    assert "@attribute" in content.lower()
+    assert "@data" in content.lower()
+    
+    # Check metadata consistency with file content
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+    
+    # Count data lines (after @data)
+    lines = content.split('\n')
+    data_started = False
+    data_lines = 0
+    for line in lines:
+        if line.strip().lower().startswith('@data'):
+            data_started = True
+            continue
+        if data_started and line.strip() and not line.strip().startswith('%'):
+            data_lines += 1
+    
+    # Basic consistency checks - metadata should have necessary fields
+    assert data_lines > 0
+    assert "features" in metadata
+    assert len(metadata["features"]) > 0
+
+
+@pytest.mark.parametrize(
+    "params, err_type, err_msg",
+    [
+        # Test invalid data_id
+        (
+            {"data_id": -1},
+            ValueError,
+            "The 'data_id' parameter of download_openml must be an int in the range",
+        ),
+        # Test invalid version
+        (
+            {"data_id": 61, "version": "invalid"},
+            ValueError,
+            "The 'version' parameter of download_openml must be an int in the range",
+        ),
+        # Test invalid format
+        (
+            {"data_id": 61, "format": "invalid"},
+            ValueError,
+            "The 'format' parameter of download_openml must be a str among",
+        ),
+        # Test missing both name and data_id
+        (
+            {},
+            ValueError,
+            "Neither name nor data_id are provided. Please provide name or data_id.",
+        ),
+    ],
+)
+def test_download_openml_parameter_validation(params, err_type, err_msg):
+    """Test parameter validation for download_openml."""
+    with pytest.raises(err_type, match=err_msg):
+        download_openml(**params)
+
+
+@pytest.mark.parametrize("gzip_response", [True, False])
+def test_download_openml_nonexistent_dataset(monkeypatch, gzip_response):
+    """Test error handling for non-existent datasets."""
+    # Use a dataset ID that should raise an error in the mock
+    data_id = 99999  # Non-existent dataset
+    
+    # The mock will raise an error for non-existent datasets
+    with pytest.raises((ValueError, HTTPError)):
+        download_openml(data_id=data_id, cache=False)
+
+
+@pytest.mark.parametrize("gzip_response", [True, False])  
+def test_download_openml_caching_behavior(monkeypatch, gzip_response, tmpdir):
+    """Test that caching works correctly for download_openml."""
+    data_id = 61  # iris dataset
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=gzip_response)
+    
+    cache_directory = str(tmpdir.mkdir("test_cache"))
+    
+    # First download with caching
+    data_path1, metadata_path1 = download_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        format="arff"
+    )
+    
+    # Check files exist
+    assert os.path.exists(data_path1)
+    assert os.path.exists(metadata_path1)
+    
+    # Get file modification times
+    data_mtime1 = os.path.getmtime(data_path1)
+    metadata_mtime1 = os.path.getmtime(metadata_path1)
+    
+    # Second download with caching - should reuse cached files
+    data_path2, metadata_path2 = download_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        format="arff"
+    )
+    
+    # Paths should be the same
+    assert data_path1 == data_path2
+    assert metadata_path1 == metadata_path2
+    
+    # Files should not have been re-downloaded (same modification times)
+    assert os.path.getmtime(data_path1) == data_mtime1
+    assert os.path.getmtime(metadata_path1) == metadata_mtime1
+
+
+def test_download_openml_cache_false(monkeypatch, tmpdir):
+    """Test download_openml with cache=False."""
+    data_id = 61  # iris dataset
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=True)
+    
+    # Download without caching
+    data_path, metadata_path = download_openml(
+        data_id=data_id,
+        cache=False,
+        format="arff"
+    )
+    
+    # Files should still be created temporarily
+    assert isinstance(data_path, str)
+    assert isinstance(metadata_path, str)
+    assert data_path.endswith(".arff")
+    assert metadata_path.endswith(".json")
+
+
+@pytest.mark.parametrize("gzip_response", [True, False])
+def test_download_openml_metadata_consistency(monkeypatch, gzip_response, tmpdir):
+    """Test that metadata is consistent between download_openml and fetch_openml."""
+    data_id = 61  # iris dataset
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=gzip_response)
+    
+    cache_directory = str(tmpdir.mkdir("test_consistency"))
+    
+    # Download using download_openml
+    data_path, metadata_path = download_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        format="arff"
+    )
+    
+    # Load metadata
+    with open(metadata_path, "r") as f:
+        download_metadata = json.load(f)
+    
+    # Fetch using fetch_openml for comparison
+    fetch_result = fetch_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        as_frame=False,
+        parser="liac-arff"
+    )
+    
+    # Compare key metadata fields
+    assert download_metadata["dataset_id"] == int(fetch_result.details["id"])
+    assert download_metadata["name"] == fetch_result.details["name"]
+    
+    # Check features consistency - features include target, so should be feature_names + target
+    expected_feature_count = len(fetch_result.feature_names)
+    if hasattr(fetch_result, 'target_names') and fetch_result.target_names is not None:
+        if isinstance(fetch_result.target_names, list):
+            expected_feature_count += len(fetch_result.target_names)
+        else:
+            expected_feature_count += 1  # Single target
+    else:
+        expected_feature_count += 1  # Default single target
+    
+    assert len(download_metadata["features"]) == expected_feature_count
+    
+    # Check target columns exist
+    assert "target_columns" in download_metadata
+    assert isinstance(download_metadata["target_columns"], list)
+
+
+@pytest.mark.parametrize(
+    "dataset_params",
+    [
+        {"data_id": 61},  # by ID
+        {"name": "iris", "version": 1},  # by name and version  
+        {"name": "iris"},  # by name only (latest version)
+    ],
+)
+@pytest.mark.parametrize("gzip_response", [True, False])
+def test_download_openml_dataset_lookup_methods(
+    monkeypatch, dataset_params, gzip_response, tmpdir
+):
+    """Test different methods of specifying datasets (ID, name+version, name only)."""
+    data_id = 61  # iris dataset for mocking
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=gzip_response)
+    
+    cache_directory = str(tmpdir.mkdir("test_lookup"))
+    
+    data_path, metadata_path = download_openml(
+        cache=True,
+        data_home=cache_directory,
+        format="arff",
+        **dataset_params
+    )
+    
+    # Verify files exist and have correct extensions
+    assert os.path.exists(data_path)
+    assert os.path.exists(metadata_path)
+    assert data_path.endswith(".arff")
+    assert metadata_path.endswith(".json")
+    
+    # Load and verify metadata
+    with open(metadata_path, "r") as f:
+        metadata = json.load(f)
+    
+    # All lookup methods should resolve to the same dataset
+    assert metadata["dataset_id"] == data_id
+    assert "iris" in metadata["name"].lower()
+
+
+def test_download_openml_return_types(monkeypatch, tmpdir):
+    """Test that download_openml returns the correct types."""
+    data_id = 61  # iris dataset
+    _monkey_patch_webbased_functions(monkeypatch, data_id, gzip_response=True)
+    
+    cache_directory = str(tmpdir.mkdir("test_types"))
+    
+    result = download_openml(
+        data_id=data_id,
+        cache=True,
+        data_home=cache_directory,
+        format="arff"
+    )
+    
+    # Should return a tuple of two strings
+    assert isinstance(result, tuple)
+    assert len(result) == 2
+    
+    data_path, metadata_path = result
+    assert isinstance(data_path, str)
+    assert isinstance(metadata_path, str)

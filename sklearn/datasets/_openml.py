@@ -31,7 +31,7 @@ from ..utils._param_validation import (
 from . import get_data_home
 from ._arff_parser import load_arff_from_gzip_file
 
-__all__ = ["fetch_openml"]
+__all__ = ["fetch_openml", "download_openml"]
 
 _SEARCH_NAME = "https://api.openml.org/api/v1/json/data/list/data_name/{}/limit/2"
 _DATA_INFO = "https://api.openml.org/api/v1/json/data/{}"
@@ -1158,3 +1158,255 @@ def fetch_openml(
     )
 
     return bunch
+
+
+@validate_params(
+    {
+        "name": [str, None],
+        "version": [Interval(Integral, 1, None, closed="left"), StrOptions({"active"})],
+        "data_id": [Interval(Integral, 1, None, closed="left"), None],
+        "data_home": [str, os.PathLike, None],
+        "cache": [bool],
+        "n_retries": [Interval(Integral, 1, None, closed="left")],
+        "delay": [Interval(Real, 0.0, None, closed="neither")],
+        "format": [StrOptions({"arff", "parquet"})],
+    },
+    prefer_skip_nested_validation=True,
+)
+def download_openml(
+    name: Optional[str] = None,
+    *,
+    version: Union[str, int] = "active",
+    data_id: Optional[int] = None,
+    data_home: Optional[Union[str, os.PathLike]] = None,
+    cache: bool = True,
+    n_retries: int = 3,
+    delay: float = 1.0,
+    format: str = "arff",
+):
+    """Download dataset from OpenML and return file paths.
+
+    Downloads raw dataset files and metadata from OpenML but returns the paths
+    to the downloaded files instead of loading the data into memory. This enables
+    integration with modern data processing libraries like Polars, Dask, etc.
+    and supports lazy loading workflows.
+
+    .. versionadded:: 1.6
+
+    .. note:: EXPERIMENTAL
+
+        This API is experimental and might have small backward-incompatible
+        changes without notice or warning in future releases.
+
+    Parameters
+    ----------
+    name : str, default=None
+        String identifier of the dataset. Note that OpenML can have multiple
+        datasets with the same name.
+
+    version : int or 'active', default='active'
+        Version of the dataset. Can only be provided if also ``name`` is given.
+        If 'active' the oldest version that's still active is used. Since
+        there may be more than one active version of a dataset, and those
+        versions may fundamentally be different from one another, setting an
+        exact version is highly recommended.
+
+    data_id : int, default=None
+        OpenML ID of the dataset. The most specific way of retrieving a
+        dataset. If data_id is not given, name (and potential version) are
+        used to obtain a dataset.
+
+    data_home : str or path-like, default=None
+        Specify another download and cache folder for the data sets. By default
+        all scikit-learn data is stored in '~/scikit_learn_data' subfolders.
+
+    cache : bool, default=True
+        Whether to cache the downloaded datasets into `data_home`.
+
+    n_retries : int, default=3
+        Number of retries when HTTP errors or network timeouts are encountered.
+        Error with status code 412 won't be retried as they represent OpenML
+        generic errors.
+
+    delay : float, default=1.0
+        Number of seconds between retries.
+
+    format : {"arff", "parquet"}, default="arff"
+        Format of the data file to download. OpenML supports both ARFF and
+        Parquet formats for most datasets.
+
+    Returns
+    -------
+    data_file : str
+        Path to the downloaded data file (ARFF or Parquet format).
+
+    metadata_file : str
+        Path to the downloaded metadata JSON file containing dataset information,
+        features description, and target column names.
+
+    Examples
+    --------
+    >>> from sklearn.datasets import download_openml
+    >>> import polars as pl
+    >>> import json
+    >>> data_file, metadata_file = download_openml("iris", version=1)  # doctest: +SKIP
+    >>> data = pl.read_parquet(data_file) if data_file.endswith('.parquet') else pl.read_csv(data_file)  # doctest: +SKIP
+    >>> with open(metadata_file, 'r') as f:  # doctest: +SKIP
+    ...     metadata = json.load(f)  # doctest: +SKIP
+    >>> target_column = metadata['target_columns'][0]  # doctest: +SKIP
+    >>> X = data.drop(target_column)  # doctest: +SKIP
+    >>> y = data[target_column]  # doctest: +SKIP
+    """
+    if cache is False:
+        # no caching will be applied
+        data_home = None
+    else:
+        data_home = get_data_home(data_home=data_home)
+        data_home = join(str(data_home), "openml")
+
+    # check valid function arguments. data_id XOR (name, version) should be
+    # provided
+    if name is not None:
+        # OpenML is case-insensitive, but the caching mechanism is not
+        # convert all data names (str) to lower case
+        name = name.lower()
+        if data_id is not None:
+            raise ValueError(
+                "Dataset data_id={} and name={} passed, but you can only "
+                "specify a numeric data_id or a name, not "
+                "both.".format(data_id, name)
+            )
+        data_info = _get_data_info_by_name(
+            name, version, data_home, n_retries=n_retries, delay=delay
+        )
+        data_id = data_info["did"]
+    elif data_id is not None:
+        # from the previous if statement, it is given that name is None
+        if version != "active":
+            raise ValueError(
+                "Dataset data_id={} and version={} passed, but you can only "
+                "specify a numeric data_id or a version, not "
+                "both.".format(data_id, version)
+            )
+    else:
+        raise ValueError(
+            "Neither name nor data_id are provided. Please provide name or data_id."
+        )
+
+    # Get dataset description and features
+    data_description = _get_data_description_by_id(data_id, data_home)
+    if data_description["status"] != "active":
+        warn(
+            "Version {} of dataset {} is inactive, meaning that issues have "
+            "been found in the dataset. Try using a newer version from "
+            "this URL: {}".format(
+                data_description["version"],
+                data_description["name"],
+                data_description["url"],
+            )
+        )
+    if "error" in data_description:
+        warn(
+            "OpenML registered a problem with the dataset. It might be "
+            "unusable. Error: {}".format(data_description["error"])
+        )
+    if "warning" in data_description:
+        warn(
+            "OpenML raised a warning on the dataset. It might be "
+            "unusable. Warning: {}".format(data_description["warning"])
+        )
+
+    features_list = _get_data_features(data_id, data_home)
+
+    # Determine target columns from features metadata
+    target_columns = [
+        feature["name"]
+        for feature in features_list
+        if feature["is_target"] == "true"
+    ]
+
+    # Create metadata to save alongside the data file
+    metadata = {
+        "dataset_id": data_id,
+        "name": data_description["name"],
+        "version": data_description["version"],
+        "description": data_description["description"],
+        "target_columns": target_columns,
+        "features": features_list,
+        "url": "https://www.openml.org/d/{}".format(data_id),
+        "format": format,
+        "md5_checksum": data_description["md5_checksum"],
+    }
+
+    # Determine file URL and extension based on format
+    if format == "parquet":
+        # Use OpenML's parquet endpoint if available
+        if "parquet_url" in data_description and data_description["parquet_url"]:
+            data_url = data_description["parquet_url"]
+            data_extension = ".parquet"
+        else:
+            raise ValueError(
+                f"Parquet format not available for dataset {data_id}. "
+                "Try format='arff' instead."
+            )
+    else:  # format == "arff"
+        data_url = data_description["url"]
+        data_extension = ".arff"  # The existing mechanism decompresses gzipped files
+
+    # Download the data file if not cached
+    if data_home is not None:
+        # Create a cache key based on dataset id and format
+        cache_key = f"data_{data_id}_{format}"
+        data_cache_path = join(data_home, cache_key + data_extension)
+        metadata_cache_path = join(data_home, cache_key + "_metadata.json")
+
+        # Ensure directory exists
+        os.makedirs(data_home, exist_ok=True)
+
+        # Download data file 
+        if not os.path.exists(data_cache_path):
+            if format == "parquet":
+                # For parquet files, download directly without OpenML's decompression logic
+                req = Request(data_url)
+                with closing(_retry_on_network_error(n_retries, delay, data_url)(urlopen)(req)) as fsrc:
+                    with open(data_cache_path, 'wb') as fdst:
+                        shutil.copyfileobj(fsrc, fdst)
+            else:
+                # Use the existing _open_openml_url mechanism which handles ARFF decompression
+                with closing(_open_openml_url(data_url, data_home, n_retries, delay)) as fsrc:
+                    with open(data_cache_path, 'wb') as fdst:
+                        shutil.copyfileobj(fsrc, fdst)
+
+        # Save metadata file
+        if not os.path.exists(metadata_cache_path):
+            with open(metadata_cache_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+
+        return data_cache_path, metadata_cache_path
+    else:
+        # No caching - create temporary files
+        import tempfile
+        temp_dir = tempfile.mkdtemp()
+        
+        # Create temporary file paths
+        temp_data_path = join(temp_dir, f"temp_data_{data_id}_{format}{data_extension}")
+        temp_metadata_path = join(temp_dir, f"temp_metadata_{data_id}_{format}.json")
+        
+        # Download data file to temporary location
+        if format == "parquet":
+            # For parquet files, download directly without OpenML's decompression logic
+            req = Request(data_url)
+            with closing(_retry_on_network_error(n_retries, delay, data_url)(urlopen)(req)) as fsrc:
+                with open(temp_data_path, 'wb') as fdst:
+                    shutil.copyfileobj(fsrc, fdst)
+        else:
+            # Use the existing _open_openml_url mechanism which handles ARFF decompression
+            with closing(_open_openml_url(data_url, None, n_retries, delay)) as fsrc:
+                with open(temp_data_path, 'wb') as fdst:
+                    shutil.copyfileobj(fsrc, fdst)
+        
+        # Save metadata file to temporary location
+        with open(temp_metadata_path, 'w') as f:
+            json.dump(metadata, f, indent=2)
+        
+        return temp_data_path, temp_metadata_path
