@@ -24,7 +24,7 @@ from ._covtype import fetch_covtype
 from ._kddcup99 import fetch_kddcup99
 from ._lfw import fetch_lfw_pairs, fetch_lfw_people
 from ._olivetti_faces import fetch_olivetti_faces
-from ._openml import fetch_openml
+from ._openml import fetch_openml, download_openml
 from ._rcv1 import fetch_rcv1
 from ._samples_generator import (
     make_biclusters,
@@ -58,6 +58,7 @@ from ._twenty_newsgroups import fetch_20newsgroups, fetch_20newsgroups_vectorize
 
 __all__ = [
     "clear_data_home",
+    "download_openml",
     "dump_svmlight_file",
     "fetch_20newsgroups",
     "fetch_20newsgroups_vectorized",
